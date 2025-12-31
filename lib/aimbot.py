@@ -15,6 +15,7 @@ import platform
 import subprocess
 from collections import deque
 import threading
+import statistics
 
 # ============================================================================
 # INPUT STRUCTURES
@@ -90,360 +91,470 @@ screen_x = int(screen_res_x / 2)
 screen_y = int(screen_res_y / 2)
 
 # ============================================================================
-# MOUSE PATH RECORDER & PLAYBACK SYSTEM
+# REAL-TIME MOUSE PATH MANAGER
 # ============================================================================
 
-class MousePathRecorder:
-    """Records mouse movements and creates smooth paths"""
+class RealTimeMousePathManager:
+    """Manages mouse paths in real-time with editing and optimization"""
     def __init__(self):
-        self.recording = False
-        self.mouse_paths = []
+        self.mouse_paths = []  # List of dictionaries with path data
         self.current_path = []
-        self.last_position = None
-        self.last_time = None
+        self.path_history = deque(maxlen=30)  # Track which paths are used
         
-        # Try to load existing recorded paths
+        # Learning parameters
+        self.max_paths = 6
+        self.min_path_length = 3
+        self.max_path_age = 30  # seconds
+        self.edit_probability = 0.02  # 2% chance to edit a path
+        self.keep_probability = 0.85  # 85% chance to keep a good path
+        
+        # Anti-shake parameters
+        self.min_movement_threshold = 0.3
+        self.max_direction_change = math.radians(25)
+        
+        # Load existing paths
         self.load_paths()
+        
+        print(f"[PATH MANAGER] Initialized with {len(self.mouse_paths)} paths")
     
-    def start_recording(self):
-        """Start recording mouse movements"""
-        self.recording = True
-        self.current_path = []
-        print("[RECORDING] Started recording mouse paths")
-    
-    def stop_recording(self):
-        """Stop recording"""
-        self.recording = False
-        if self.current_path:
-            self.mouse_paths.append(self.current_path.copy())
-            self.save_paths()
-            print(f"[RECORDING] Saved path with {len(self.current_path)} movements")
-    
-    def record_movement(self, dx, dy):
-        """Record a mouse movement"""
-        if not self.recording:
+    def add_movement(self, dx, dy, is_aimbot_movement=False):
+        """Add movement to current path with anti-shake"""
+        current_time = time.time()
+        
+        # Filter out micro-shakes
+        movement_mag = math.sqrt(dx*dx + dy*dy)
+        if movement_mag < self.min_movement_threshold:
             return
         
-        current_time = time.time()
-        movement = {
-            'dx': dx,
-            'dy': dy,
-            'timestamp': current_time,
-            'speed': math.sqrt(dx*dx + dy*dy) / max(0.001, current_time - self.last_time if self.last_time else 0.001)
-        }
+        # Calculate direction
+        direction = math.atan2(dy, dx)
         
-        self.current_path.append(movement)
-        self.last_time = current_time
+        # Prevent crazy direction changes by smoothing
+        if self.current_path and len(self.current_path) > 0:
+            last_dx, last_dy, last_time = self.current_path[-1]
+            last_direction = math.atan2(last_dy, last_dx)
+            direction_diff = abs(((direction - last_direction + math.pi) % (2 * math.pi)) - math.pi)
+            
+            if direction_diff > self.max_direction_change:
+                # Smooth the direction change
+                direction = last_direction + np.sign(((direction - last_direction + math.pi) % (2 * math.pi)) - math.pi) * self.max_direction_change
         
-        # Limit path length
-        if len(self.current_path) > 1000:
-            self.current_path = self.current_path[-500:]
+        self.current_path.append((dx, dy, current_time))
+        
+        # Auto-save path if it's long enough and there's a pause
+        if len(self.current_path) >= 15 and (current_time - self.current_path[-1][2] > 0.1):
+            self.save_current_path()
     
-    def get_optimized_path(self, required_distance, target_direction):
-        """Get an optimized path based on required distance and direction"""
+    def save_current_path(self):
+        """Save current path if it meets criteria"""
+        if len(self.current_path) < self.min_path_length:
+            self.current_path = []
+            return
+        
+        # Calculate path characteristics
+        total_dx = sum(p[0] for p in self.current_path)
+        total_dy = sum(p[1] for p in self.current_path)
+        total_distance = math.sqrt(total_dx*total_dx + total_dy*total_dy)
+        
+        # Only save meaningful paths
+        if total_distance > 5:  # Minimum meaningful distance
+            path_data = {
+                'movements': self.current_path.copy(),
+                'created': time.time(),
+                'last_used': time.time(),
+                'usage_count': 0,
+                'total_distance': total_distance,
+                'avg_speed': total_distance / max(0.001, self.current_path[-1][2] - self.current_path[0][2]),
+                'direction': math.atan2(total_dy, total_dx)
+            }
+            
+            self.mouse_paths.append(path_data)
+            self.path_history.append(len(self.mouse_paths) - 1)
+            
+            print(f"[PATH] Saved new path with {len(self.current_path)} movements")
+        
+        self.current_path = []
+    
+    def get_random_path(self, required_distance, target_direction):
+        """Get a random path that matches requirements"""
         if not self.mouse_paths:
             return None
         
-        # Filter paths by similarity to required distance
-        suitable_paths = []
-        for path in self.mouse_paths:
-            if len(path) < 3:
-                continue
-            
-            # Calculate total distance of path
-            path_distance = sum(math.sqrt(m['dx']**2 + m['dy']**2) for m in path)
-            
-            # Check if path distance is within 30% of required distance
-            if abs(path_distance - required_distance) < required_distance * 0.3:
-                suitable_paths.append((path, path_distance))
+        current_time = time.time()
         
-        if not suitable_paths:
+        # Clean up old paths first
+        self.mouse_paths = [p for p in self.mouse_paths 
+                           if current_time - p['created'] < self.max_path_age]
+        
+        if not self.mouse_paths:
             return None
         
-        # Choose the best matching path
-        best_path = min(suitable_paths, key=lambda x: abs(x[1] - required_distance))[0]
-        
-        # Extract just the movement vectors
-        movements = [(m['dx'], m['dy']) for m in best_path]
-        
-        # Adjust direction to match target
-        adjusted_movements = self.adjust_direction(movements, target_direction)
-        
-        # Adjust speed based on required distance
-        final_movements = self.adjust_speed(adjusted_movements, required_distance)
-        
-        return final_movements
-    
-    def adjust_direction(self, movements, target_direction):
-        """Adjust movements to point toward target direction"""
-        if not movements:
-            return movements
-        
-        # Calculate current direction of path
-        path_dx = sum(dx for dx, dy in movements)
-        path_dy = sum(dy for dx, dy in movements)
-        path_direction = math.atan2(path_dy, path_dx) if path_dx != 0 or path_dy != 0 else 0
-        
-        # Calculate rotation needed
-        rotation_angle = target_direction - path_direction
-        
-        # Rotate all movements
-        rotated_movements = []
-        for dx, dy in movements:
-            distance = math.sqrt(dx*dx + dy*dy)
-            current_angle = math.atan2(dy, dx)
-            new_angle = current_angle + rotation_angle
+        # Score paths based on similarity
+        scored_paths = []
+        for i, path in enumerate(self.mouse_paths):
+            distance_diff = abs(path['total_distance'] - required_distance) / max(required_distance, 1)
+            direction_diff = abs(((path['direction'] - target_direction + math.pi) % (2 * math.pi)) - math.pi) / math.pi
             
-            new_dx = distance * math.cos(new_angle)
-            new_dy = distance * math.sin(new_angle)
+            # Calculate score (lower is better)
+            score = distance_diff * 0.6 + direction_diff * 0.4
+            scored_paths.append((score, i, path))
+        
+        # Sort by score and pick from top 3
+        scored_paths.sort(key=lambda x: x[0])
+        top_paths = scored_paths[:min(3, len(scored_paths))]
+        
+        if not top_paths:
+            return None
+        
+        # Randomly choose from top paths
+        chosen_score, chosen_idx, chosen_path = random.choice(top_paths)
+        
+        # Update usage stats
+        chosen_path['last_used'] = time.time()
+        chosen_path['usage_count'] += 1
+        
+        # Occasionally edit the path
+        if random.random() < self.edit_probability:
+            chosen_path = self.edit_path(chosen_path)
+            self.mouse_paths[chosen_idx] = chosen_path
+        
+        return chosen_path['movements']
+    
+    def edit_path(self, path_data):
+        """Edit a path to improve it"""
+        movements = path_data['movements']
+        
+        if len(movements) < 3:
+            return path_data
+        
+        edit_type = random.choice(['speed', 'rotate', 'invert', 'smooth'])
+        
+        if edit_type == 'speed':
+            # Change speed by random factor (0.8 to 1.2)
+            factor = random.uniform(0.8, 1.2)
+            new_movements = [(dx * factor, dy * factor, t) for dx, dy, t in movements]
             
-            rotated_movements.append((new_dx, new_dy))
-        
-        return rotated_movements
-    
-    def adjust_speed(self, movements, required_distance):
-        """Adjust movement speed to match required distance"""
-        if not movements:
-            return movements
-        
-        # Calculate current total distance
-        current_distance = sum(math.sqrt(dx*dx + dy*dy) for dx, dy in movements)
-        
-        if current_distance == 0:
-            return movements
-        
-        # Calculate scaling factor
-        scale_factor = required_distance / current_distance
-        
-        # Apply scaling
-        scaled_movements = [(dx * scale_factor, dy * scale_factor) for dx, dy in movements]
-        
-        return scaled_movements
-    
-    def save_paths(self):
-        """Save recorded paths to file"""
-        try:
-            with open("mouse_paths.json", 'w') as f:
-                # Convert to serializable format
-                serializable_paths = []
-                for path in self.mouse_paths[-10:]:  # Keep last 10 paths
-                    serializable_path = []
-                    for m in path:
-                        serializable_path.append({
-                            'dx': float(m['dx']),
-                            'dy': float(m['dy']),
-                            'speed': float(m.get('speed', 0))
-                        })
-                    serializable_paths.append(serializable_path)
+        elif edit_type == 'rotate':
+            # Rotate by random angle (-30 to 30 degrees)
+            angle = random.uniform(-math.pi/6, math.pi/6)
+            new_movements = []
+            for dx, dy, t in movements:
+                new_dx = dx * math.cos(angle) - dy * math.sin(angle)
+                new_dy = dx * math.sin(angle) + dy * math.cos(angle)
+                new_movements.append((new_dx, new_dy, t))
                 
-                json.dump(serializable_paths, f, indent=2)
-            print(f"[RECORDING] Saved {len(self.mouse_paths)} paths")
-        except:
-            pass
+        elif edit_type == 'invert':
+            # Invert direction (go opposite way)
+            invert_type = random.choice(['mirror', 'reverse', 'both'])
+            if invert_type == 'mirror':
+                new_movements = [(-dx, -dy, t) for dx, dy, t in movements]
+            elif invert_type == 'reverse':
+                new_movements = list(reversed(movements))
+            else:  # both
+                new_movements = list(reversed([(-dx, -dy, t) for dx, dy, t in movements]))
+                
+        else:  # smooth
+            # Smooth the path by averaging adjacent movements
+            new_movements = []
+            for i in range(len(movements)):
+                if i == 0 or i == len(movements) - 1:
+                    new_movements.append(movements[i])
+                else:
+                    dx1, dy1, t1 = movements[i-1]
+                    dx2, dy2, t2 = movements[i]
+                    dx3, dy3, t3 = movements[i+1]
+                    avg_dx = (dx1 + dx2 + dx3) / 3
+                    avg_dy = (dy1 + dy2 + dy3) / 3
+                    new_movements.append((avg_dx, avg_dy, t2))
+        
+        # Update path data
+        total_dx = sum(p[0] for p in new_movements)
+        total_dy = sum(p[1] for p in new_movements)
+        path_data['movements'] = new_movements
+        path_data['total_distance'] = math.sqrt(total_dx*total_dx + total_dy*total_dy)
+        path_data['direction'] = math.atan2(total_dy, total_dx)
+        
+        print(f"[EDIT] Path edited with {edit_type} modification")
+        return path_data
+    
+    def manage_paths(self):
+        """Manage path collection - remove unused paths"""
+        if len(self.mouse_paths) <= self.max_paths:
+            return
+        
+        current_time = time.time()
+        
+        # Score paths based on usage and age
+        scored_paths = []
+        for i, path in enumerate(self.mouse_paths):
+            age_score = (current_time - path['created']) / self.max_path_age
+            usage_score = 1.0 / (path['usage_count'] + 1)
+            last_used_score = (current_time - path['last_used']) / self.max_path_age
+            
+            total_score = age_score * 0.3 + usage_score * 0.3 + last_used_score * 0.4
+            scored_paths.append((total_score, i))
+        
+        # Sort by score (higher = worse)
+        scored_paths.sort(key=lambda x: x[0], reverse=True)
+        
+        # Remove worst paths
+        paths_to_remove = len(self.mouse_paths) - self.max_paths
+        for i in range(paths_to_remove):
+            if i < len(scored_paths):
+                idx = scored_paths[i][1]
+                del self.mouse_paths[idx]
+                print(f"[MANAGE] Removed unused path")
     
     def load_paths(self):
-        """Load recorded paths from file"""
+        """Load paths from file"""
         try:
-            if os.path.exists("mouse_paths.json"):
-                with open("mouse_paths.json", 'r') as f:
-                    loaded_paths = json.load(f)
-                
-                self.mouse_paths = []
-                for path in loaded_paths:
-                    self.mouse_paths.append(path)
-                
-                print(f"[RECORDING] Loaded {len(self.mouse_paths)} recorded paths")
-                return True
+            if os.path.exists("mouse_paths_rt.json"):
+                with open("mouse_paths_rt.json", 'r') as f:
+                    data = json.load(f)
+                    self.mouse_paths = data.get('paths', [])
+                    print(f"[LOAD] Loaded {len(self.mouse_paths)} paths")
         except:
             pass
-        return False
+    
+    def save_paths(self):
+        """Save paths to file"""
+        try:
+            data = {
+                'paths': self.mouse_paths,
+                'saved_at': time.time()
+            }
+            with open("mouse_paths_rt.json", 'w') as f:
+                json.dump(data, f, default=str)
+        except:
+            pass
 
 # ============================================================================
-# OPTIMIZED SMOOTH AIMING CONTROLLER
+# REALISTIC AIMING CONTROLLER
 # ============================================================================
 
-class OptimizedAimingController:
+class RealisticAimingController:
     def __init__(self, box_constant=320):
         self.box_constant = box_constant
-        self.path_recorder = MousePathRecorder()
+        self.path_manager = RealTimeMousePathManager()
         
-        # Performance stats
-        self.performance_stats = {
-            'avg_response_time': 0.015,
-            'move_count': 0
-        }
+        # Realistic settings (1-3% different)
+        self.base_speed = 4.2
+        self.smoothing = 0.76  # 1% more smoothing
+        self.max_step_size = 45
+        self.deadzone_radius = 3.5  # Tighter deadzone
         
-        # OPTIMIZED SPEED SETTINGS (FAST)
-        self.base_speed = 4.2          # Increased speed
-        self.smoothing = 0.75          # Smooth but fast
-        self.max_step_size = 45        # Larger steps for speed
-        self.deadzone_radius = 4       # Small deadzone
-        self.min_move_threshold = 0.5
-        
-        # Body part definitions
-        self.body_parts = {
-            'head': {'ratio': 0.25, 'weight': 1.0},
-            'neck': {'ratio': 0.33, 'weight': 0.9},
-            'chest': {'ratio': 0.40, 'weight': 0.8},
-            'belly': {'ratio': 0.55, 'weight': 0.7},
-            'groin': {'ratio': 0.70, 'weight': 0.6},
-            'legs': {'ratio': 0.85, 'weight': 0.5}
-        }
+        # Anti-shake system
+        self.last_positions = deque(maxlen=5)
+        self.shake_threshold = 0.8
+        self.stable_counter = 0
         
         # Target tracking
         self.target_data = {}
+        self.last_aim_time = 0
         
-        # Start recording immediately (ALWAYS RECORDING)
-        self.start_recording()
+        # Random path selection
+        self.current_path_index = -1
+        self.path_transition_smooth = 0.1
+        self.last_path_switch = 0
+        self.min_path_switch_time = 0.3
         
-        print("[CONTROLLER] Optimized aiming controller initialized")
-        print(f"[SPEED] Base speed: {self.base_speed}, Smoothing: {self.smoothing}")
-    
-    def start_recording(self):
-        """Start recording mouse movements"""
-        self.path_recorder.start_recording()
-    
-    def stop_recording(self):
-        """Stop recording"""
-        self.path_recorder.stop_recording()
-    
-    def record_movement(self, dx, dy):
-        """Record a mouse movement"""
-        self.path_recorder.record_movement(dx, dy)
+        # FIX: Store last chosen aim point per target
+        self.last_aim_points = {}
+        self.aim_point_consistency_threshold = 2.0  # pixels
+        self.min_aim_stability_time = 0.1  # seconds
+        
+        print("[CONTROLLER] Realistic aiming controller initialized")
+        print(f"[REALISM] Settings: Speed={self.base_speed}, Smooth={self.smoothing}")
+        print("[ANTI-SHAKE] Shake prevention enabled")
+        print("[PATHS] Real-time path management active")
     
     def get_crosshair_position(self):
         return self.box_constant // 2, self.box_constant // 2
     
-    def get_closest_body_part(self, target_bbox):
+    def get_aim_point(self, target_bbox, target_id, distance_to_target):
+        """Get realistic aim point with natural variance and anti-shake"""
         x1, y1, x2, y2 = target_bbox
         width = x2 - x1
         height = y2 - y1
-        cross_x, cross_y = self.get_crosshair_position()
         
-        part_distances = {}
-        for part, data in self.body_parts.items():
-            part_x = x1 + (width // 2)
-            part_y = y1 + (height * data['ratio'])
-            dist = math.sqrt((part_x - cross_x)**2 + (part_y - cross_y)**2)
-            weighted_dist = dist / data['weight']
-            part_distances[part] = weighted_dist
-        
-        return min(part_distances, key=part_distances.get)
-    
-    def get_smooth_aim_point(self, target_bbox, target_id):
-        x1, y1, x2, y2 = target_bbox
-        width = x2 - x1
-        height = y2 - y1
         current_time = time.time()
         
-        closest_part = self.get_closest_body_part(target_bbox)
+        # FIX: When very close to target, use consistent aim point
+        if distance_to_target < 15:  # Very close to target
+            # Check if we recently aimed at this target
+            if target_id in self.last_aim_points:
+                last_point, last_time = self.last_aim_points[target_id]
+                # If we aimed at this target recently, use the same point
+                if current_time - last_time < self.min_aim_stability_time:
+                    return last_point
         
-        if target_id not in self.target_data:
-            upper_options = ['chest', 'neck', 'head']
-            target_part = random.choice(upper_options)
-            
-            self.target_data[target_id] = {
-                'current_part': closest_part,
-                'target_part': target_part,
-                'transition_progress': 0.0,
-                'last_seen': current_time,
-                'last_closest': closest_part
-            }
-        else:
-            target_info = self.target_data[target_id]
-            target_info['last_seen'] = current_time
-            
-            if closest_part != target_info['last_closest']:
-                target_info['last_closest'] = closest_part
-                target_info['current_part'] = closest_part
-                target_info['transition_progress'] = 0.0
-                upper_options = ['chest', 'neck', 'head']
-                target_info['target_part'] = random.choice(upper_options)
-            
-            if target_info['current_part'] != target_info['target_part']:
-                current_ratio = self.body_parts[target_info['current_part']]['ratio']
-                target_ratio = self.body_parts[target_info['target_part']]['ratio']
-                
-                transition_speed = 0.04
-                target_info['transition_progress'] = min(
-                    1.0, 
-                    target_info['transition_progress'] + transition_speed
-                )
-                
-                if target_info['transition_progress'] >= 1.0:
-                    target_info['current_part'] = target_info['target_part']
-                    target_info['transition_progress'] = 0.0
-        
-        target_info = self.target_data[target_id]
-        
-        if target_info['transition_progress'] > 0:
-            start_ratio = self.body_parts[target_info['current_part']]['ratio']
-            end_ratio = self.body_parts[target_info['target_part']]['ratio']
-            progress = target_info['transition_progress']
-            ease_progress = 1 - (1 - progress) ** 2  # Faster easing
-            current_ratio = start_ratio + (end_ratio - start_ratio) * ease_progress
-        else:
-            current_ratio = self.body_parts[target_info['current_part']]['ratio']
+        # FIX: Choose body part based on distance for more stability
+        # Closer = more headshots, further = more chest shots
+        if distance_to_target < 25:  # Close range
+            if random.random() < 0.7:  # 70% headshots at close range
+                ratio = 0.25  # Fixed head position
+                # Small variance only
+                ratio += random.uniform(-0.02, 0.02)
+            else:  # 30% chest at close range
+                ratio = 0.4
+                ratio += random.uniform(-0.03, 0.03)
+        else:  # Long range
+            if random.random() < 0.4:  # 40% headshots at long range
+                ratio = 0.25
+                ratio += random.uniform(-0.03, 0.03)
+            elif random.random() < 0.8:  # 40% chest at long range
+                ratio = 0.4
+                ratio += random.uniform(-0.04, 0.04)
+            else:  # 20% other at long range
+                ratio = 0.55
+                ratio += random.uniform(-0.05, 0.05)
         
         aim_x = x1 + (width // 2)
-        aim_y = y1 + (height * current_ratio)
+        aim_y = y1 + (height * ratio)
         
-        offset_x = random.uniform(-width * 0.015, width * 0.015)
-        offset_y = random.uniform(-height * 0.01, height * 0.01)
+        # FIX: Reduce variance when close to target
+        variance_multiplier = max(0.1, min(1.0, distance_to_target / 50))
         
-        return aim_x + offset_x, aim_y + offset_y
+        # Natural human-like variance (reduced when close)
+        variance_x = width * random.uniform(-0.012, 0.012) * variance_multiplier
+        variance_y = height * random.uniform(-0.01, 0.01) * variance_multiplier
+        
+        final_aim_point = (aim_x + variance_x, aim_y + variance_y)
+        
+        # Store this aim point for consistency
+        self.last_aim_points[target_id] = (final_aim_point, current_time)
+        
+        # Clean up old aim points
+        old_targets = [tid for tid, (_, ttime) in self.last_aim_points.items() 
+                      if current_time - ttime > 1.0]
+        for tid in old_targets:
+            if tid in self.last_aim_points:
+                del self.last_aim_points[tid]
+        
+        return final_aim_point
     
-    def calculate_movement_from_recorded_path(self, dx, dy):
-        """Use recorded mouse paths for movement"""
+    def is_shaking(self, dx, dy):
+        """Detect if aim is shaking (micro-movements)"""
+        movement = math.sqrt(dx*dx + dy*dy)
+        
+        self.last_positions.append((dx, dy))
+        
+        if len(self.last_positions) < 3:
+            return False
+        
+        # Check for back-and-forth movements
+        direction_changes = 0
+        for i in range(1, len(self.last_positions)):
+            prev_dx, prev_dy = self.last_positions[i-1]
+            curr_dx, curr_dy = self.last_positions[i]
+            
+            prev_dir = math.atan2(prev_dy, prev_dx)
+            curr_dir = math.atan2(curr_dy, curr_dx)
+            
+            dir_diff = abs(((curr_dir - prev_dir + math.pi) % (2 * math.pi)) - math.pi)
+            if dir_diff > math.pi * 0.7:  # Large direction change
+                direction_changes += 1
+        
+        if direction_changes >= 2 and movement < 2:
+            self.stable_counter = max(0, self.stable_counter - 1)
+            return self.stable_counter < -2
+        else:
+            self.stable_counter = min(3, self.stable_counter + 1)
+            return False
+    
+    def get_movement_from_paths(self, dx, dy, force_new_path=False):
+        """Get movement from stored paths with smooth transitions"""
         required_distance = math.sqrt(dx*dx + dy*dy)
         target_direction = math.atan2(dy, dx)
         
-        # Try to get a recorded path
-        recorded_movements = self.path_recorder.get_optimized_path(required_distance, target_direction)
+        current_time = time.time()
         
-        if recorded_movements:
-            # Use recorded path
-            total_dx = sum(move[0] for move in recorded_movements)
-            total_dy = sum(move[1] for move in recorded_movements)
-            
-            # Scale to match exact required distance
-            recorded_distance = math.sqrt(total_dx**2 + total_dy**2)
-            if recorded_distance > 0:
-                scale = required_distance / recorded_distance
-                total_dx *= scale
-                total_dy *= scale
+        # FIX: When very close to target, use direct movement for stability
+        if required_distance < 10:  # Very close to target
+            # Use direct movement with increased smoothing
+            speed = self.base_speed * 0.5  # Slower when close
+            move_dx = dx * speed * (self.smoothing + 0.2)  # Extra smoothing
+            move_dy = dy * speed * (self.smoothing + 0.2)
+            return move_dx, move_dy
+        
+        # Check if we should switch paths
+        should_switch = (force_new_path or 
+                        current_time - self.last_path_switch > self.min_path_switch_time or
+                        self.current_path_index == -1 or
+                        random.random() < 0.15)  # 15% chance to switch
+        
+        if should_switch:
+            # Get a new random path
+            path_movements = self.path_manager.get_random_path(required_distance, target_direction)
+            if path_movements:
+                self.current_path_index = random.randint(0, len(self.path_manager.mouse_paths) - 1)
+                self.last_path_switch = current_time
+            else:
+                path_movements = None
         else:
-            # Use optimized calculation
-            speed_mult = self.base_speed
-            smooth = self.smoothing
-            
-            if required_distance > 80:
-                speed_mult *= 1.3
-            elif required_distance < 15:
-                speed_mult *= 0.9
-            
-            total_dx = dx * speed_mult * smooth
-            total_dy = dy * speed_mult * smooth
+            # Continue with current path
+            if 0 <= self.current_path_index < len(self.path_manager.mouse_paths):
+                path = self.path_manager.mouse_paths[self.current_path_index]
+                path_movements = path['movements']
+            else:
+                path_movements = None
         
-        return total_dx, total_dy
+        if path_movements:
+            # Use the path
+            total_dx = sum(m[0] for m in path_movements)
+            total_dy = sum(m[1] for m in path_movements)
+            
+            # Adjust to match exact requirements
+            path_distance = math.sqrt(total_dx**2 + total_dy**2)
+            path_direction = math.atan2(total_dy, total_dx)
+            
+            if path_distance > 0:
+                # Scale and rotate
+                scale = required_distance / path_distance
+                rotation = target_direction - path_direction
+                
+                # Apply to each movement
+                adjusted_movements = []
+                for move_dx, move_dy, _ in path_movements:
+                    # Rotate
+                    rot_dx = move_dx * math.cos(rotation) - move_dy * math.sin(rotation)
+                    rot_dy = move_dx * math.sin(rotation) + move_dy * math.cos(rotation)
+                    
+                    # Scale
+                    adjusted_movements.append((rot_dx * scale, rot_dy * scale))
+                
+                # Use first movement for immediate response
+                if adjusted_movements:
+                    return adjusted_movements[0]
+        
+        # Fallback: calculate direct movement
+        speed = self.base_speed * (0.9 + 0.2 * random.random())  # 10% variance
+        move_dx = dx * speed * self.smoothing
+        move_dy = dy * speed * self.smoothing
+        
+        return move_dx, move_dy
     
-    def execute_optimized_movement(self, dx, dy, target_speed=0, distance=0):
-        """Execute fast optimized movement"""
-        if abs(dx) < 0.5 and abs(dy) < 0.5:
+    def execute_realistic_movement(self, dx, dy, target_speed=0, distance=0):
+        """Execute movement with realistic feel and anti-shake"""
+        # FIX: Check if we're in deadzone - stop all movement
+        distance_to_target = math.sqrt(dx*dx + dy*dy)
+        if distance_to_target < self.deadzone_radius:
+            # In deadzone, no movement at all
             return
         
-        start_time = time.perf_counter()
+        # Check for shaking
+        if self.is_shaking(dx, dy):
+            # Don't move if shaking detected
+            print("[ANTI-SHAKE] Shake detected, holding position")
+            return
         
-        # Calculate movement using recorded paths
-        move_dx, move_dy = self.calculate_movement_from_recorded_path(dx, dy)
+        # Calculate movement
+        move_dx, move_dy = self.get_movement_from_paths(dx, dy)
         
-        # Apply speed boost for moving targets
+        # Apply realistic speed adjustments
         if target_speed > 20:
-            move_dx *= 1.25
-            move_dy *= 1.25
-        
-        # Record this movement for future learning
-        self.path_recorder.record_movement(move_dx, move_dy)
+            move_dx *= 1.2
+            move_dy *= 1.2
         
         # Limit step size
         move_distance = math.sqrt(move_dx**2 + move_dy**2)
@@ -452,6 +563,10 @@ class OptimizedAimingController:
             move_dx *= scale
             move_dy *= scale
         
+        # FIX: Very small movements are noise - ignore them
+        if move_distance < 0.5:
+            return
+        
         # Convert to integers
         move_dx_int = int(round(move_dx))
         move_dy_int = int(round(move_dy))
@@ -459,107 +574,42 @@ class OptimizedAimingController:
         if move_dx_int == 0 and move_dy_int == 0:
             return
         
-        # FAST execution (no delay)
+        # Record this movement for learning
+        self.path_manager.add_movement(move_dx, move_dy, True)
+        
+        # Execute
         try:
             subprocess.run(
                 ["xdotool", "mousemove_relative", "--",
                  str(move_dx_int), str(move_dy_int)],
                 capture_output=True,
-                timeout=0.01
+                timeout=0.008
             )
         except:
             pass
         
-        # Update stats
-        response_time = time.perf_counter() - start_time
-        self.performance_stats['avg_response_time'] = (
-            0.95 * self.performance_stats['avg_response_time'] + 0.05 * response_time
-        )
-        self.performance_stats['move_count'] += 1
+        # Manage paths periodically
+        if random.random() < 0.05:  # 5% chance each movement
+            self.path_manager.manage_paths()
     
-    def get_aim_point(self, target_bbox, target_id):
-        return self.get_smooth_aim_point(target_bbox, target_id)
-
-# ============================================================================
-# PROFESSIONAL AIM STYLE (donk-inspired but keeps YOUR style)
-# ============================================================================
-
-class ProAimEnhancer:
-    """Enhances your aim with professional techniques while keeping your style"""
-    def __init__(self):
-        # Keep your base settings but enhance them
-        self.consistency_boost = 1.1  # Makes your aim more consistent
-        self.headshot_focus = 0.7     # 70% chance for headshots (not 85% to keep your style)
-        self.smooth_lock = 0.9        # Smoother lock when close
-        
-        # Anti-shake system
-        self.last_movement = (0, 0)
-        self.movement_buffer = deque(maxlen=3)
-        self.shake_threshold = 1.5
-        
-    def enhance_movement(self, dx, dy, target_bbox=None):
-        """Enhance your movement with professional smoothness"""
-        distance = math.sqrt(dx*dx + dy*dy)
-        
-        # Anti-shake: Don't make tiny back-and-forth movements
-        if len(self.movement_buffer) >= 2:
-            avg_dx = np.mean([m[0] for m in self.movement_buffer])
-            avg_dy = np.mean([m[1] for m in self.movement_buffer])
-            
-            # Check if we're shaking (changing direction rapidly)
-            current_dir = math.atan2(dy, dx)
-            avg_dir = math.atan2(avg_dy, avg_dx)
-            dir_diff = abs(((current_dir - avg_dir + math.pi) % (2 * math.pi)) - math.pi)
-            
-            if dir_diff > math.radians(60) and distance < 10:
-                # Likely shaking - use average direction
-                dx = avg_dx * 0.7 + dx * 0.3
-                dy = avg_dy * 0.7 + dy * 0.3
-                distance = math.sqrt(dx*dx + dy*dy)
-        
-        # Store in buffer
-        self.movement_buffer.append((dx, dy))
-        
-        # Apply professional smoothness
-        if distance < 5:
-            # Very close - extra smooth
-            smooth_factor = 0.9
-        elif distance < 20:
-            # Medium distance - balanced
-            smooth_factor = 0.8
-        else:
-            # Far distance - your original style
-            smooth_factor = 0.75
-        
-        # Apply consistency boost
-        enhanced_dx = dx * self.consistency_boost * smooth_factor
-        enhanced_dy = dy * self.consistency_boost * smooth_factor
-        
-        return enhanced_dx, enhanced_dy
-    
-    def enhance_aim_point(self, aim_x, aim_y, target_bbox, is_headshot=False):
-        """Enhance aim point with professional precision"""
+    def stop_shaking_at_target(self, target_bbox):
+        """Prevent shaking when perfectly aimed"""
         x1, y1, x2, y2 = target_bbox
-        width = x2 - x1
-        height = y2 - y1
+        center_x = (x1 + x2) // 2
+        center_y = (y1 + y2) // 2
         
-        if is_headshot and random.random() < self.headshot_focus:
-            # Professional headshot precision
-            aim_y = y1 + height * 0.22  # Slightly higher for headshots
-            # Reduce random offset for headshots
-            offset_scale = 0.5
-        else:
-            # Your original style
-            offset_scale = 1.0
+        cross_x, cross_y = self.get_crosshair_position()
+        distance = math.sqrt((center_x - cross_x)**2 + (center_y - cross_y)**2)
         
-        # Add small professional offset (less random, more deliberate)
-        offset_x = random.uniform(-width * 0.01, width * 0.01) * offset_scale
-        offset_y = random.uniform(-height * 0.008, height * 0.008) * offset_scale
+        # If very close to target, increase stability
+        if distance < 3:
+            self.stable_counter = min(5, self.stable_counter + 1)
+            return True
         
-        return aim_x + offset_x, aim_y + offset_y
+        return False
 
 # ============================================================================
-# MAIN AIMBOT CLASS (FIXED - No jerking, keeps your style)
+# MAIN AIMBOT CLASS
 # ============================================================================
 
 class Aimbot:
@@ -582,146 +632,60 @@ class Aimbot:
             print(colored(f"[!] Model Error: {e}", "red"))
             self.model = None
         
-        self.confidence = 0.35
-        self.iou = 0.35
+        # Realistic settings
+        self.confidence = 0.38  # Slightly higher for more certainty
+        self.iou = 0.32
         
-        # Your original controller
-        self.aim_controller = OptimizedAimingController(box_constant=self.box_constant)
+        # Initialize realistic controller
+        self.aim_controller = RealisticAimingController(box_constant=self.box_constant)
         
-        # Professional enhancer (doesn't replace, just enhances)
-        self.pro_enhancer = ProAimEnhancer()
-        
+        # Performance tracking
         self.target_fps = 240
         self.running = True
+        self.frame_count = 0
+        self.last_path_save = time.time()
         
-        print(colored("\n[+] Professional Enhanced Aimbot Initialized", "green"))
+        # FIX: Target tracking for consistency
+        self.last_target_positions = {}
+        self.target_stability_threshold = 5.0  # pixels
+        
+        print(colored("\n[+] Realistic Aimbot Initialized", "green"))
         print(colored(f"    • Target FPS: {self.target_fps}", "cyan"))
-        print(colored(f"    • Your Speed: {self.aim_controller.base_speed}", "cyan"))
-        print(colored(f"    • Your Smoothing: {self.aim_controller.smoothing}", "cyan"))
-        print(colored("    • Anti-shake system: ENABLED", "cyan"))
-        print(colored("    • Professional enhancement: ENABLED", "cyan"))
-        print(colored("    • Your style + Pro precision = Perfect aim", "cyan"))
+        print(colored(f"    • Base Speed: {self.aim_controller.base_speed}", "cyan"))
+        print(colored("    • Real-time path learning: ENABLED", "cyan"))
+        print(colored("    • Anti-shake system: ACTIVE", "cyan"))
+        print(colored("    • Path editing: ENABLED (2% chance)", "cyan"))
+        print(colored("\n[FEATURES]", "yellow"))
+        print(colored("    • Random path selection", "white"))
+        print(colored("    • Real-time path management", "white"))
+        print(colored("    • No shaking at targets", "white"))
+        print(colored("    • Natural human-like variance", "white"))
         print(colored("\n[CONTROLS]", "yellow"))
         print(colored("    • Mouse Button 4: Toggle Aimbot", "white"))
         print(colored("    • Mouse Button 5: Exit", "white"))
-        print(colored("\n[NOTE] ESC and Q keys disabled - use Mouse Button 5 to exit", "yellow"))
     
     @staticmethod
     def is_aimbot_enabled():
         return Aimbot.aimbot_status == colored("ENABLED", 'green')
     
-    @staticmethod
-    def is_target_locked(x, y):
-        # Your original threshold
-        threshold = 6
-        return (screen_x - threshold <= x <= screen_x + threshold and 
-                screen_y - threshold <= y <= screen_y + threshold)
+    def get_aim_point(self, target_bbox, target_id, distance_to_target):
+        return self.aim_controller.get_aim_point(target_bbox, target_id, distance_to_target)
     
-    def get_aim_point(self, target_bbox, target_id):
-        # Get your original aim point
-        aim_point = self.aim_controller.get_aim_point(target_bbox, target_id)
-        
-        if isinstance(aim_point, tuple) and len(aim_point) >= 2:
-            aim_x, aim_y = aim_point
-            # Enhance with professional precision
-            enhanced_point = self.pro_enhancer.enhance_aim_point(
-                aim_x, aim_y, target_bbox, 
-                is_headshot=random.random() < 0.7  # 70% headshot focus
-            )
-            return enhanced_point
-        
-        # Fallback to center
-        x1, y1, x2, y2 = target_bbox
-        return (x1 + x2) // 2, (y1 + y2) // 2
-    
-    def execute_smooth_aim(self, dx, dy, target_speed=0, distance=0, target_bbox=None):
-        """Execute aim with anti-shake and professional smoothness"""
-        if abs(dx) < 0.5 and abs(dy) < 0.5:
-            return
-        
-        # Enhance movement with professional smoothness
-        enhanced_dx, enhanced_dy = self.pro_enhancer.enhance_movement(dx, dy, target_bbox)
-        
-        # Use your original controller but with enhanced movement
-        # We'll temporarily replace the controller's calculation
-        
-        # Calculate required distance and direction
-        required_distance = math.sqrt(enhanced_dx*enhanced_dx + enhanced_dy*enhanced_dy)
-        target_direction = math.atan2(enhanced_dy, enhanced_dx)
-        
-        # Try to get a recorded path from YOUR style
-        recorded_movements = self.aim_controller.path_recorder.get_optimized_path(
-            required_distance, target_direction
-        )
-        
-        if recorded_movements:
-            # Use YOUR recorded path
-            total_dx = sum(move[0] for move in recorded_movements)
-            total_dy = sum(move[1] for move in recorded_movements)
-            
-            # Scale to match exact required distance
-            recorded_distance = math.sqrt(total_dx**2 + total_dy**2)
-            if recorded_distance > 0:
-                scale = required_distance / recorded_distance
-                total_dx *= scale
-                total_dy *= scale
-        else:
-            # Use YOUR optimized calculation
-            speed_mult = self.aim_controller.base_speed
-            smooth = self.aim_controller.smoothing
-            
-            if required_distance > 80:
-                speed_mult *= 1.3
-            elif required_distance < 15:
-                speed_mult *= 0.9
-            
-            total_dx = enhanced_dx * speed_mult * smooth
-            total_dy = enhanced_dy * speed_mult * smooth
-        
-        # Apply speed boost for moving targets
-        if target_speed > 20:
-            total_dx *= 1.25
-            total_dy *= 1.25
-        
-        # Record this movement for YOUR future learning
-        self.aim_controller.path_recorder.record_movement(total_dx, total_dy)
-        
-        # Limit step size
-        move_distance = math.sqrt(total_dx**2 + total_dy**2)
-        if move_distance > self.aim_controller.max_step_size:
-            scale = self.aim_controller.max_step_size / move_distance
-            total_dx *= scale
-            total_dy *= scale
-        
-        # Convert to integers
-        move_dx_int = int(round(total_dx))
-        move_dy_int = int(round(total_dy))
-        
-        if move_dx_int == 0 and move_dy_int == 0:
-            return
-        
-        # Execute
-        try:
-            subprocess.run(
-                ["xdotool", "mousemove_relative", "--",
-                 str(move_dx_int), str(move_dy_int)],
-                capture_output=True,
-                timeout=0.01
-            )
-        except:
-            pass
-    
-    def ultra_fast_aim(self, target_info, target_id):
+    def realistic_aim(self, target_info, target_id):
         if not Aimbot.is_aimbot_enabled():
-            return False
-        
-        start_time = time.perf_counter()
+            return False, False
         
         x1, y1 = target_info["x1y1"]
         x2, y2 = target_info["x2y2"]
-        distance = target_info["distance"]
         
-        aim_x, aim_y = self.get_aim_point((x1, y1, x2, y2), target_id)
+        # Calculate distance from crosshair to target center
+        target_center_x = (x1 + x2) // 2
+        target_center_y = (y1 + y2) // 2
+        cross_x, cross_y = self.aim_controller.get_crosshair_position()
+        distance_to_target = math.sqrt((target_center_x - cross_x)**2 + (target_center_y - cross_y)**2)
+        
+        # Get aim point with distance consideration
+        aim_x, aim_y = self.get_aim_point((x1, y1, x2, y2), target_id, distance_to_target)
         
         absolute_x = aim_x + target_info.get('box_left', 0)
         absolute_y = aim_y + target_info.get('box_top', 0)
@@ -729,26 +693,33 @@ class Aimbot:
         dx = absolute_x - screen_x
         dy = absolute_y - screen_y
         
-        # Don't move if very close (prevents shaking)
-        if abs(dx) < 1.5 and abs(dy) < 1.5:
-            return True
+        # FIX: Apply extra smoothing when very close to target
+        current_distance = math.sqrt(dx*dx + dy*dy)
         
-        # Calculate target speed
-        target_speed = 0
+        # If very close, use stronger smoothing
+        if current_distance < 10:
+            # Scale down the movement even more when close
+            scale_factor = max(0.3, current_distance / 20)
+            dx *= scale_factor
+            dy *= scale_factor
         
-        # Execute smooth aim
-        self.execute_smooth_aim(dx, dy, target_speed, distance, (x1, y1, x2, y2))
+        # Check if we should stop shaking
+        is_stable = self.aim_controller.stop_shaking_at_target((x1, y1, x2, y2))
         
-        locked = Aimbot.is_target_locked(absolute_x, absolute_y)
+        # FIX: Stronger deadzone when very close
+        if abs(dx) < 2.0 and abs(dy) < 2.0 and is_stable:
+            return True, True
         
-        response_time = (time.perf_counter() - start_time) * 1000
-        if response_time > 20:
-            print(f"[RESPONSE] {response_time:.1f}ms")
+        # Execute realistic movement with distance info
+        self.aim_controller.execute_realistic_movement(dx, dy, 0, current_distance)
         
-        return locked
+        # Check if locked
+        locked = (abs(dx) < 3 and abs(dy) < 3)
+        
+        return locked, is_stable
     
     def start(self, is_aimbot_enabled_fn=None):
-        print(colored("\n[+] Starting capture...", "green"))
+        print(colored("\n[+] Starting realistic capture...", "green"))
         
         box_size = 320
         detection_box = {
@@ -762,6 +733,11 @@ class Aimbot:
         last_fps_time = time.time()
         fps = 0
         
+        # Also record natural mouse movements
+        import Xlib.display
+        display = Xlib.display.Display()
+        root = display.screen().root
+        
         try:
             while self.running:
                 frame_start = time.perf_counter()
@@ -770,15 +746,32 @@ class Aimbot:
                 if is_aimbot_enabled_fn:
                     aimbot_enabled = is_aimbot_enabled_fn()
                 
+                # Capture screen
                 screenshot = self.screen.grab(detection_box)
                 frame = np.array(screenshot, dtype=np.uint8)
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
                 
-                closest_target = None
-                closest_distance = float('inf')
-                closest_id = None
+                # Get mouse movement (even when not aiming)
+                try:
+                    pointer = root.query_pointer()
+                    mouse_x, mouse_y = pointer.root_x, pointer.root_y
+                    
+                    # Record natural mouse movements
+                    if hasattr(self, 'last_mouse_pos'):
+                        last_x, last_y = self.last_mouse_pos
+                        dx = mouse_x - last_x
+                        dy = mouse_y - last_y
+                        
+                        # Record all mouse movements (including crazy goofy ones)
+                        self.aim_controller.path_manager.add_movement(dx, dy, False)
+                    
+                    self.last_mouse_pos = (mouse_x, mouse_y)
+                except:
+                    pass
                 
-                if self.model:
+                # Detect targets
+                targets = []
+                if self.model and aimbot_enabled:
                     try:
                         results = self.model.predict(
                             source=frame,
@@ -800,63 +793,95 @@ class Aimbot:
                                     dist = math.dist((center_x, center_y), 
                                                    (box_size // 2, box_size // 2))
                                     
-                                    if dist < closest_distance:
-                                        closest_distance = dist
-                                        closest_id = f"target_{i}_{time.time():.3f}"
-                                        
-                                        closest_target = {
-                                            "x1y1": (x1, y1),
-                                            "x2y2": (x2, y2),
-                                            "height": y2 - y1,
-                                            "center": (center_x, center_y),
-                                            "distance": dist,
-                                            "box_left": detection_box['left'],
-                                            "box_top": detection_box['top']
-                                        }
+                                    target_id = f"target_{i}"
+                                    targets.append({
+                                        "id": target_id,
+                                        "x1y1": (x1, y1),
+                                        "x2y2": (x2, y2),
+                                        "center": (center_x, center_y),
+                                        "distance": dist,
+                                        "box_left": detection_box['left'],
+                                        "box_top": detection_box['top']
+                                    })
                     except:
                         pass
                 
-                if closest_target and aimbot_enabled:
-                    locked = self.ultra_fast_aim(closest_target, closest_id)
+                # Process closest target
+                if targets and aimbot_enabled:
+                    closest_target = min(targets, key=lambda x: x["distance"])
+                    locked, stable = self.realistic_aim(closest_target, closest_target["id"])
                     
-                    status_color = (0, 255, 0) if locked else (0, 165, 255)
-                    status_text = "LOCKED" if locked else "TRACKING"
+                    # Draw target info
+                    color = (0, 255, 0) if locked else (0, 165, 255)
+                    thickness = 2
                     
-                    cv2.putText(frame, status_text, (10, 30),
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
+                    x1, y1 = closest_target["x1y1"]
+                    x2, y2 = closest_target["x2y2"]
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
+                    
+                    # Draw status
+                    if locked:
+                        status = "LOCKED"
+                    elif stable:
+                        status = "STABLE"
+                    else:
+                        status = "TRACKING"
+                    
+                    cv2.putText(frame, status, (x1, y1 - 10),
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                    
+                    # Draw distance info
+                    dist_text = f"Dist: {closest_target['distance']:.1f}"
+                    cv2.putText(frame, dist_text, (x1, y1 - 30),
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 100), 1)
                 
+                # Update FPS
                 frame_count += 1
                 current_time = time.time()
                 if current_time - last_fps_time >= 1.0:
                     fps = frame_count
                     frame_count = 0
                     last_fps_time = current_time
+                    
+                    # Auto-save paths every 10 seconds
+                    if current_time - self.last_path_save > 10:
+                        self.aim_controller.path_manager.save_paths()
+                        self.last_path_save = current_time
+                        print(f"[SAVE] Paths saved ({len(self.aim_controller.path_manager.mouse_paths)} active)")
                 
-                cv2.putText(frame, f"FPS: {fps}", (10, 60),
+                # Display overlay
+                cv2.putText(frame, f"FPS: {fps}", (10, 30),
                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (50, 50, 255), 2)
                 
                 status_color = (0, 255, 0) if aimbot_enabled else (0, 0, 255)
-                status_text = "AIMBOT: ON" if aimbot_enabled else "AIMBOT: OFF"
-                cv2.putText(frame, status_text, (10, 90),
+                status_text = "REALISTIC AIM: ON" if aimbot_enabled else "REALISTIC AIM: OFF"
+                cv2.putText(frame, status_text, (10, 60),
                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
                 
-                # Display style info
-                cv2.putText(frame, f"Your Style + Pro Enhance", (10, 120),
-                          cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 100), 2)
+                # Display path info
+                active_paths = len(self.aim_controller.path_manager.mouse_paths)
+                cv2.putText(frame, f"Paths: {active_paths}/6", (10, 90),
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 100), 2)
+                
+                cv2.putText(frame, f"Speed: {self.aim_controller.base_speed}", (10, 115),
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 200, 200), 2)
                 
                 cv2.putText(frame, "Anti-Shake: ACTIVE", (10, 140),
-                          cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 200, 200), 2)
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 255, 100), 2)
                 
-                cv2.imshow("Professional Enhanced Aimbot", frame)
+                cv2.putText(frame, "Distance-based aiming", (10, 165),
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 100, 255), 2)
+                
+                cv2.imshow("Realistic Aimbot", frame)
                 
                 # Check for exit
                 key = cv2.waitKey(1) & 0xFF
-                if cv2.getWindowProperty("Professional Enhanced Aimbot", cv2.WND_PROP_VISIBLE) < 1:
+                if cv2.getWindowProperty("Realistic Aimbot", cv2.WND_PROP_VISIBLE) < 1:
                     break
                 
+                # Maintain FPS
                 loop_time = time.perf_counter() - frame_start
                 target_time = 1.0 / self.target_fps
-                
                 if loop_time < target_time:
                     time.sleep(target_time - loop_time)
         
@@ -864,12 +889,19 @@ class Aimbot:
             print(colored("\n[!] Interrupted", "yellow"))
         finally:
             cv2.destroyAllWindows()
-            self.aim_controller.stop_recording()
+            
+            # Save paths on exit
+            self.aim_controller.path_manager.save_paths()
             
             print(colored("\n" + "="*50, "cyan"))
-            print(colored("PERFORMANCE STATISTICS", "cyan", attrs=['bold']))
+            print(colored("REALISTIC PERFORMANCE SUMMARY", "cyan", attrs=['bold']))
             print(colored("="*50, "cyan"))
-            stats = self.aim_controller.performance_stats
-            print(f"Average Response Time: {stats['avg_response_time']*1000:.1f}ms")
-            print(f"Total Movements: {stats['move_count']}")
+            print(f"Active paths saved: {len(self.aim_controller.path_manager.mouse_paths)}")
+            print(f"Path edits performed: Real-time")
             print(colored("="*50, "cyan"))
+
+# ============================================================================
+# ALIAS FOR BACKWARD COMPATIBILITY
+# ============================================================================
+
+aimbot = Aimbot
