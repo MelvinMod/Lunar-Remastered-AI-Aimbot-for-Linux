@@ -1,5 +1,5 @@
 # Lunar-Remastered-AI-Aimbot-for-Linux
-I'm MelvinSGjr, the first(?) creator of [ai aimbot for linux](https://github.com/MelvinSGjr/Lunar-AI-Aimbot-for-Linux/tree/main), I have lost access to aupload anything on my previous account, so I made a new one
+I'm MelvinSGjr, the first(?) creator of [ai aimbot for linux](https://github.com/MelvinSGjr/Lunar-AI-Aimbot-for-Linux/tree/main), I have lost access to upload anything on my previous account, so I made a new one
 
 ## Key Differences Summary:
 
