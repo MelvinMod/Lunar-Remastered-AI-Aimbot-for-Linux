@@ -9,7 +9,7 @@ I'm MelvinSGjr, the first(?) creator of [ai aimbot for linux](https://github.com
   - `OptimizedAimingController` - Handles aiming logic
   - `ProAimEnhancer` - Adds professional aiming techniques
   - `Aimbot` - Main orchestrator
-- **Old `aimbot (copy).py`**: Single monolithic class with mixed responsibilities
+- **Old `aimbot.py`**: Single monolithic class with mixed responsibilities
 
 ### **2. Aiming Philosophy**
 - **New**: "Your style + Pro enhancement" - Keeps your natural aiming style while adding professional techniques
