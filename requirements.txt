@@ -1,0 +1,29 @@
+--find-links https://download.pytorch.org/whl/torch_stable.html
+
+torch
+torchvision
+ultralytics
+
+matplotlib
+numpy
+opencv-python
+Pillow
+PyYAML
+scipy
+tqdm
+tensorboard
+seaborn
+pandas
+
+mss
+pygame
+pynput
+pywin32
+requests
+wheel
+termcolor
+pyautogui
+playsound
+
+# For Linux X11 mouse control
+# Requires xdotool (install via: sudo apt install xdotool or sudo pacman -S xdotool)

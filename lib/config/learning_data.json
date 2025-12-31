@@ -1,0 +1,32 @@
+{
+  "patterns": [],
+  "successful_hits": 1124,
+  "total_attempts": 9702,
+  "accuracy_stats": {
+    "total_shots": 4477,
+    "hits": 1124,
+    "misses": 3353,
+    "headshots": 817,
+    "bodyshots": 307,
+    "limbshots": 0,
+    "last_10_shots": [
+      "miss",
+      "miss",
+      "miss",
+      "miss",
+      "miss",
+      "miss",
+      "miss",
+      "miss",
+      "miss",
+      "miss"
+    ],
+    "session_start_time": 1751351533.1375122,
+    "best_accuracy": 100.0,
+    "current_streak": 0,
+    "best_streak": 222,
+    "consecutive_hits": 0,
+    "consecutive_misses": 0
+  },
+  "last_saved": 1765297730.8910017
+}
