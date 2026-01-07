@@ -1,6 +1,10 @@
 # Lunar-Remastered-AI-Aimbot-for-Linux
 I'm MelvinSGjr, the first(?) creator of [ai aimbot for linux](https://github.com/MelvinSGjr/Lunar-AI-Aimbot-for-Linux/tree/main), I have lost access to upload anything on my previous account, so I made a new one
 
+## I NEED YOUR HELP:
+I have bad knowledge of Python.
+Join telegram chat to talk about improvement of **REALISTIC** AI Aimbot **for Linux**: https://t.me/+Rjwih-cYDrkwYzdi
+
 ## Key Differences Summary:
 
 ### **1. Architecture & Modularity**
