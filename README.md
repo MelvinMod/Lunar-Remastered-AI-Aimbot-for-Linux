@@ -3,7 +3,7 @@ I'm MelvinSGjr, the first(?) creator of [ai aimbot for linux](https://github.com
 
 ## I NEED YOUR HELP:
 I have bad knowledge of Python.
-Join telegram chat to talk about improvement of **REALISTIC** AI Aimbot **for Linux**: https://t.me/+Rjwih-cYDrkwYzdi
+Join telegram chat to talk about improvement of **REALISTIC** AI Aimbot **for Linux**: https://t.me/linuxrealisticaimbot
 
 ## Key Differences Summary:
 
