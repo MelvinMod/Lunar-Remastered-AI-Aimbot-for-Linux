@@ -3,7 +3,7 @@ I'm MelvinSGjr, the first(?) creator of [ai aimbot for linux](https://github.com
 
 ## I NEED YOUR HELP:
 I have bad knowledge of Python.
-Join [Matrix chat](https://matrix.to/#/#The-Robuster%27s-Workshop:matrix.org) (*Warning, a lot of Russians, I'm from Romania, can understand Russians*) to talk about improvement of **Modding/Cheating in games**
+Join [Matrix chat](https://matrix.to/#/#The-Robuster%27s-Workshop:matrix.org) (*Warning, a lot of Russians, I'm from Romania, can understand Russians*) to talk about improvement of **Modding/Cheating in games**.
 
 ## Key Differences Summary:
 
